@@ -5,13 +5,31 @@ on:
     branches: [main]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      api: ${{ steps.filter.outputs.api }}
+      converter: ${{ steps.filter.outputs.converter }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'app/**'
+            api:
+              - 'lambda/api/**'
+            converter:
+              - 'lambda/converter/**'
+
   # ── Next.js app → VPS ───────────────────────────────────────────────────────
   deploy-app:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     name: Deploy app to VPS
     runs-on: ubuntu-latest
-    if: |
-      contains(toJson(github.event.commits.*.modified), 'app/') ||
-      contains(toJson(github.event.commits.*.added), 'app/')
     steps:
       - uses: appleboy/ssh-action@v1.0.3
         with:
@@ -28,11 +46,10 @@ jobs:
 
   # ── api-handler Lambda → zip deploy ─────────────────────────────────────────
   deploy-api:
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
     name: Deploy api-handler Lambda
     runs-on: ubuntu-latest
-    if: |
-      contains(toJson(github.event.commits.*.modified), 'lambda/api/') ||
-      contains(toJson(github.event.commits.*.added), 'lambda/api/')
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
@@ -50,11 +67,10 @@ jobs:
 
   # ── converter Lambda → Docker build + ECR push ──────────────────────────────
   deploy-converter:
+    needs: changes
+    if: needs.changes.outputs.converter == 'true'
     name: Build and deploy converter Lambda
     runs-on: ubuntu-latest
-    if: |
-      contains(toJson(github.event.commits.*.modified), 'lambda/converter/') ||
-      contains(toJson(github.event.commits.*.added), 'lambda/converter/')
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
