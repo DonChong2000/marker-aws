@@ -2,9 +2,10 @@ import json
 import os
 import uuid
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
-s3 = boto3.client("s3")
+s3 = boto3.client("s3", config=Config(signature_version="s3v4"))
 BUCKET = os.environ["BUCKET_NAME"]
 UPLOAD_EXPIRES = 300   # 5 min to complete upload
 DOWNLOAD_EXPIRES = 900 # 15 min to download result
