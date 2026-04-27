@@ -9,8 +9,15 @@ from marker.output import text_from_rendered
 s3 = boto3.client("s3")
 BUCKET = os.environ["BUCKET_NAME"]
 
-# Load models once at cold start (already baked into image)
-model_dict = create_model_dict()
+# Lazy-loaded — avoids init phase timeout; Lambda caches between warm invocations
+_model_dict = None
+
+
+def get_models():
+    global _model_dict
+    if _model_dict is None:
+        _model_dict = create_model_dict()
+    return _model_dict
 
 
 def write_status(job_id, status, error=None):
@@ -37,7 +44,7 @@ def lambda_handler(event, context):
         s3.download_file(BUCKET, key, input_path)
 
         try:
-            converter = PdfConverter(artifact_dict=model_dict)
+            converter = PdfConverter(artifact_dict=get_models())
             rendered = converter(input_path)
             markdown, _, _ = text_from_rendered(rendered)
         except Exception as e:
