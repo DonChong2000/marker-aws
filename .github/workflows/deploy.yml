@@ -1,1 +1,82 @@
-# TODO: fill in at Step 9
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Next.js app → VPS ───────────────────────────────────────────────────────
+  deploy-app:
+    name: Deploy app to VPS
+    runs-on: ubuntu-latest
+    if: |
+      contains(toJson(github.event.commits.*.modified), 'app/') ||
+      contains(toJson(github.event.commits.*.added), 'app/')
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ubuntu
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/github/marker-aws
+            git pull
+            cd app
+            pnpm install --frozen-lockfile
+            pnpm build
+            pm2 restart all
+
+  # ── api-handler Lambda → zip deploy ─────────────────────────────────────────
+  deploy-api:
+    name: Deploy api-handler Lambda
+    runs-on: ubuntu-latest
+    if: |
+      contains(toJson(github.event.commits.*.modified), 'lambda/api/') ||
+      contains(toJson(github.event.commits.*.added), 'lambda/api/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Zip and update Lambda
+        run: |
+          cd lambda/api
+          zip -j function.zip handler.py
+          aws lambda update-function-code \
+            --function-name marker-api-handler \
+            --zip-file fileb://function.zip
+
+  # ── converter Lambda → Docker build + ECR push ──────────────────────────────
+  deploy-converter:
+    name: Build and deploy converter Lambda
+    runs-on: ubuntu-latest
+    if: |
+      contains(toJson(github.event.commits.*.modified), 'lambda/converter/') ||
+      contains(toJson(github.event.commits.*.added), 'lambda/converter/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: lambda/converter
+          push: true
+          provenance: false
+          platforms: linux/amd64
+          tags: 642195820719.dkr.ecr.us-east-1.amazonaws.com/marker-converter:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Update Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name marker-converter \
+            --image-uri 642195820719.dkr.ecr.us-east-1.amazonaws.com/marker-converter:latest
