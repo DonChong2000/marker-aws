@@ -3,10 +3,6 @@ import os
 import tempfile
 import boto3
 
-# The symlink /var/lang/.../site-packages/static → /tmp/marker-static is baked
-# into the image. Ensure the target exists before any marker code runs.
-os.makedirs("/tmp/marker-static", exist_ok=True)
-
 s3 = boto3.client("s3")
 BUCKET = os.environ["BUCKET_NAME"]
 
