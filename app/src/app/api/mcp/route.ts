@@ -1,105 +1,119 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const API = process.env.API_URL!;
 const POLL_MS = 3000;
 const MAX_WAIT_MS = 14 * 60 * 1000;
 
-function createServer() {
-  const server = new McpServer({ name: "2md", version: "1.0.0" });
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id",
+};
 
-  server.tool(
-    "convert_to_markdown",
-    "Convert a publicly accessible document URL (PDF, DOCX, PPTX) to Markdown.",
-    { url: z.string().url(), filename: z.string().optional() },
-    async ({ url, filename }) => {
-      const name = filename ?? url.split("/").pop() ?? "document.pdf";
+async function convertToMarkdown(url: string, filename?: string): Promise<string> {
+  const name = filename ?? url.split("/").pop() ?? "document.pdf";
 
-      const { jobId, uploadUrl } = await fetch(`${API}/presign`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: name }),
-      }).then((r) => r.json());
+  const { jobId, uploadUrl } = await fetch(`${API}/presign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: name }),
+  }).then((r) => r.json());
 
-      const fileRes = await fetch(url);
-      const fileBuffer = await fileRes.arrayBuffer();
-      await fetch(uploadUrl, { method: "PUT", body: fileBuffer });
+  const fileRes = await fetch(url);
+  const fileBuffer = await fileRes.arrayBuffer();
+  await fetch(uploadUrl, { method: "PUT", body: fileBuffer });
 
-      const deadline = Date.now() + MAX_WAIT_MS;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, POLL_MS));
-        const { status } = await fetch(`${API}/status/${jobId}`).then((r) => r.json());
-        if (status === "done") {
-          const { downloadUrl } = await fetch(`${API}/result/${jobId}`).then((r) => r.json());
-          const markdown = await fetch(downloadUrl).then((r) => r.text());
-          return { content: [{ type: "text" as const, text: markdown }] };
-        }
-        if (status === "failed") throw new Error("Conversion failed");
-      }
-      throw new Error("Timed out waiting for conversion");
+  const deadline = Date.now() + MAX_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    const { status } = await fetch(`${API}/status/${jobId}`).then((r) => r.json());
+    if (status === "done") {
+      const { downloadUrl } = await fetch(`${API}/result/${jobId}`).then((r) => r.json());
+      return fetch(downloadUrl).then((r) => r.text());
     }
-  );
-
-  return server;
+    if (status === "failed") throw new Error("Conversion failed");
+  }
+  throw new Error("Timed out waiting for conversion");
 }
 
-async function handleRequest(req: NextRequest) {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  const server = createServer();
-  await server.connect(transport);
-
-  // Adapt NextRequest → Node-style request object the SDK expects
-  const body = req.method === "POST" ? await req.text() : undefined;
-  const headers: Record<string, string> = {};
-  req.headers.forEach((v, k) => { headers[k] = v; });
-
-  return new Promise<Response>((resolve) => {
-    const chunks: Buffer[] = [];
-    let statusCode = 200;
-    const resHeaders: Record<string, string> = {};
-
-    const mockRes = {
-      setHeader: (k: string, v: string) => { resHeaders[k] = v; },
-      writeHead: (code: number, hdrs?: Record<string, string>) => {
-        statusCode = code;
-        if (hdrs) Object.assign(resHeaders, hdrs);
+const TOOLS = [
+  {
+    name: "convert_to_markdown",
+    description: "Convert a publicly accessible document URL (PDF, DOCX, PPTX) to Markdown.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        url: { type: "string", description: "Publicly accessible URL of the document to convert" },
+        filename: { type: "string", description: "Optional filename hint (e.g. report.pdf)" },
       },
-      write: (chunk: Buffer | string) => {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      },
-      end: (chunk?: Buffer | string) => {
-        if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        const body = Buffer.concat(chunks);
-        resolve(new Response(body.length ? body : null, { status: statusCode, headers: resHeaders }));
-      },
-      on: () => {},
-      once: () => {},
-      emit: () => {},
-    };
+      required: ["url"],
+    },
+  },
+];
 
-    const mockReq = {
-      method: req.method,
-      url: req.url,
-      headers,
-      body: body ? Buffer.from(body) : null,
-      on: (event: string, cb: (data?: unknown) => void) => {
-        if (event === "data" && body) cb(Buffer.from(body));
-        if (event === "end") cb();
-      },
-    };
+function ok(id: unknown, result: unknown) {
+  return NextResponse.json({ jsonrpc: "2.0", id, result }, { headers: CORS });
+}
 
-    transport.handleRequest(mockReq as never, mockRes as never, body ? JSON.parse(body) : undefined);
-  });
+function rpcError(id: unknown, code: number, message: string) {
+  return NextResponse.json({ jsonrpc: "2.0", id, error: { code, message } }, { headers: CORS });
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS });
+}
+
+export async function GET() {
+  return NextResponse.json(
+    { name: "2md", version: "1.0.0", description: "Convert documents to Markdown" },
+    { headers: CORS }
+  );
 }
 
 export async function POST(req: NextRequest) {
-  return handleRequest(req);
-}
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let body: { method: string; params?: any; id?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return rpcError(null, -32700, "Parse error");
+  }
 
-export async function GET(req: NextRequest) {
-  return handleRequest(req);
+  const { method, params, id } = body;
+
+  switch (method) {
+    case "initialize":
+      return ok(id, {
+        protocolVersion: params?.protocolVersion ?? "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "2md", version: "1.0.0" },
+      });
+
+    case "notifications/initialized":
+      return new NextResponse(null, { status: 204, headers: CORS });
+
+    case "ping":
+      return ok(id, {});
+
+    case "tools/list":
+      return ok(id, { tools: TOOLS });
+
+    case "tools/call": {
+      if (params?.name !== "convert_to_markdown") {
+        return rpcError(id, -32602, "Unknown tool");
+      }
+      const { url, filename } = params.arguments ?? {};
+      if (!url) return rpcError(id, -32602, "Missing required argument: url");
+      try {
+        const markdown = await convertToMarkdown(url as string, filename as string | undefined);
+        return ok(id, { content: [{ type: "text", text: markdown }] });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return ok(id, { content: [{ type: "text", text: `Error: ${msg}` }], isError: true });
+      }
+    }
+
+    default:
+      return rpcError(id, -32601, "Method not found");
+  }
 }
