@@ -13,6 +13,10 @@ ENV TORCH_HOME=/opt/ml/torch
 RUN mkdir -p /opt/ml/models /opt/ml/hf /opt/ml/torch && \
     python -c "from marker.models import create_model_dict; create_model_dict()"
 
-COPY sitecustomize.py handler.py ./
+# Pre-download the font marker writes lazily to site-packages/static/fonts.
+# Without this, first conversion hits EROFS trying to write to read-only FS.
+RUN python -c "from marker.util import download_font; download_font()"
+
+COPY handler.py .
 
 CMD ["handler.lambda_handler"]
